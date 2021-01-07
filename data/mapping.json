@@ -1,0 +1,101 @@
+{
+    "defalut_class": "翡翠",
+    "set_by_info": {
+        "class_name": "翡翠",
+        "info_tag": "款式"
+    },
+    "info_key_dict": {
+        "店名": "",
+        "种地类型": "",
+        "款式": "",
+        "颜色": "",
+        "颜色1": "",
+        "颜色2": "",
+        "描述": ""
+    },
+    "enable_mapping": "pendant_type",
+    "jade_type": {
+        "class": {
+            "手镯": "bangle",
+            "圆条": "bangle_round",
+            "正圈": "bangle_round_flat",
+            "方镯": "bangle_flat",
+            "贵妃圆条": "bangle_oval_round",
+            "贵妃": "bangle_oval",
+            "贵妃方镯": "bangle_oval_flat",
+            "戒指": "ring",
+            "耳饰": "earrings",
+            "手链": "chain_bracelet",
+            "项链": "necklace",
+            "原石": "stone",
+            "串珠": "chain_beads",
+            "链饰": "chain",
+            "珠子": "beads",
+            "片料": "sheet_stock",
+            "挂件": "pendant",
+            "其他": "other"
+        },
+        "class_int": {
+            "圆条": 1,
+            "正圈": 2,
+            "方镯": 3,
+            "贵妃圆条": 4,
+            "贵妃": 5,
+            "贵妃方镯": 6,
+            "戒指": 7,
+            "耳饰": 8,
+            "串珠": 9,
+            "链饰": 10,
+            "其他": 11
+        },
+        "unknow_to_other": true,
+        "ignore_inner": {
+            "earrings": "other",
+            "chain": "other"
+        }
+    },
+    "pendant_type": {
+        "class": {
+            "平安扣": "ping_buckle",
+            "无事牌": "nothing_card",
+            "山水牌": "hill_water_card",
+            "佛牌": "buddha_card",
+            "观音牌": "guanyin_card",
+            "葫芦": "cucurbit",
+            "如意": "wishes",
+            "蛋面": "egg",
+            "貔貅": "pixiu",
+            "福豆": "peas",
+            "福瓜": "melon",
+            "福袋": "package",
+            "佛公": "buddha",
+            "观音": "guanyin",
+            "渡母": "dumu",
+            "如来": "rulai",
+            "叶子": "leaf",
+            "白菜": "cabbage",
+            "唐马": "horse",
+            "其他": "other"
+        },
+        "class_int": {
+            "平安扣": 1,
+            "无事牌": 2,
+            "山水牌": 3,
+            "葫芦": 4,
+            "如意": 5,
+            "蛋面": 6,
+            "福豆": 7,
+            "福瓜": 8,
+            "佛公": 9,
+            "观音": 10,
+            "叶子": 11,
+            "福袋": 12,
+            "貔貅": 13,
+            "唐马": 14,
+            "白菜": 15,
+            "其他": 16
+        },
+        "unknow_to_other": false,
+        "ignore_inner": {}
+    }
+}

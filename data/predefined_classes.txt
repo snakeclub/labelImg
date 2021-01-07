@@ -1,15 +1,30 @@
-dog
-person
-cat
-tv
-car
-meatballs
-marinara sauce
-tomato soup
-chicken noodle soup
-french onion soup
-chicken breast
-ribs
-pulled pork
-hamburger
-cavity
+翡翠
+圆条
+正圈
+方镯
+贵妃圆条
+贵妃
+贵妃方镯
+戒指
+耳饰
+链饰
+串珠
+珠子
+片料
+平安扣
+无事牌
+山水牌
+葫芦
+如意
+蛋面
+貔貅
+福豆
+福瓜
+福袋
+佛公
+观音
+如来
+叶子
+唐马
+白菜
+其他

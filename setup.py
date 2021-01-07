@@ -26,11 +26,11 @@ with open('HISTORY.rst') as history_file:
 # OS specific settings
 SET_REQUIRES = []
 if _platform == "linux" or _platform == "linux2":
-   # linux
-   print('linux')
+    # linux
+    print('linux')
 elif _platform == "darwin":
-   # MAC OS X
-   SET_REQUIRES.append('py2app')
+    # MAC OS X
+    SET_REQUIRES.append('py2app')
 
 required_packages = find_packages()
 required_packages.append('labelImg')
@@ -41,10 +41,11 @@ OPTIONS = {
     'iconfile': 'resources/icons/app.icns'
 }
 
+
 class UploadCommand(Command):
     """Support setup.py upload."""
 
-    description=readme + '\n\n' + history,
+    description = readme + '\n\n' + history,
 
     user_options = []
 

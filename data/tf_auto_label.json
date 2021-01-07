@@ -1,0 +1,15 @@
+{
+    "jade_type": {
+        "enable": false,
+        "frozen_graph": "D:/ccproject/ssd_mobilenet_v2/export/type/frozen_inference_graph.pb",
+        "min_score": 0.5,
+        "min_distance": 0.05
+    },
+    "pendant_type": {
+        "enable": false,
+        "frozen_graph": "D:/ccproject/ssd_mobilenet_v2/export/pendant/frozen_inference_graph.pb",
+        "min_score": 0.5,
+        "min_distance": 0.05
+    }
+
+}

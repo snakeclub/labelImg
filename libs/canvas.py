@@ -29,6 +29,13 @@ class Canvas(QWidget):
     shapeMoved = pyqtSignal()
     drawingPolygon = pyqtSignal(bool)
 
+    # 通过这里进行关联父对象函数
+    openPrevDir = pyqtSignal(bool)
+    openNextDir = pyqtSignal(bool)
+    openPrevImg = pyqtSignal(bool)
+    openNextImg = pyqtSignal(bool)
+    deleteCurrentFile = pyqtSignal(bool)
+
     CREATE, EDIT = list(range(2))
 
     epsilon = 11.0
@@ -119,7 +126,7 @@ class Canvas(QWidget):
                 currentWidth = abs(self.current[0].x() - pos.x())
                 currentHeight = abs(self.current[0].y() - pos.y())
                 self.parent().window().labelCoordinates.setText(
-                        'Width: %d, Height: %d / X: %d; Y: %d' % (currentWidth, currentHeight, pos.x(), pos.y()))
+                    'Width: %d, Height: %d / X: %d; Y: %d' % (currentWidth, currentHeight, pos.x(), pos.y()))
 
                 color = self.drawingLineColor
                 if self.outOfPixmap(pos):
@@ -145,7 +152,8 @@ class Canvas(QWidget):
                     min_size = min(abs(pos.x() - minX), abs(pos.y() - minY))
                     directionX = -1 if pos.x() - minX < 0 else 1
                     directionY = -1 if pos.y() - minY < 0 else 1
-                    self.line[1] = QPointF(minX + directionX * min_size, minY + directionY * min_size)
+                    self.line[1] = QPointF(minX + directionX * min_size,
+                                           minY + directionY * min_size)
                 else:
                     self.line[1] = pos
 
@@ -576,14 +584,37 @@ class Canvas(QWidget):
             self.update()
         elif key == Qt.Key_Return and self.canCloseShape():
             self.finalise()
-        elif key == Qt.Key_Left and self.selectedShape:
-            self.moveOnePixel('Left')
-        elif key == Qt.Key_Right and self.selectedShape:
-            self.moveOnePixel('Right')
-        elif key == Qt.Key_Up and self.selectedShape:
-            self.moveOnePixel('Up')
-        elif key == Qt.Key_Down and self.selectedShape:
-            self.moveOnePixel('Down')
+        elif key == Qt.Key_Left:
+            if self.selectedShape:
+                self.moveOnePixel('Left')
+            else:
+                # 上一个文件夹
+                self.openPrevDir.emit(False)
+        elif key == Qt.Key_Right:
+            if self.selectedShape:
+                self.moveOnePixel('Right')
+            else:
+                # 下一个文件夹
+                self.openNextDir.emit(False)
+        elif key == Qt.Key_Up:
+            if self.selectedShape:
+                self.moveOnePixel('Up')
+            else:
+                # 上一个图片
+                self.openPrevImg.emit(False)
+        elif key == Qt.Key_Down:
+            if self.selectedShape:
+                self.moveOnePixel('Down')
+            else:
+                # 下一个图片
+                self.openNextImg.emit(False)
+        elif key == Qt.Key_Delete:
+            if self.selectedShape:
+                # 删除标注
+                self.deleteSelected()
+            else:
+                # 删除文件
+                self.deleteCurrentFile.emit(False)
 
     def moveOnePixel(self, direction):
         # print(self.selectedShape.points)
@@ -615,10 +646,10 @@ class Canvas(QWidget):
         self.repaint()
 
     def moveOutOfBound(self, step):
-        points = [p1+p2 for p1, p2 in zip(self.selectedShape.points, [step]*4)]
+        points = [p1 + p2 for p1, p2 in zip(self.selectedShape.points, [step] * 4)]
         return True in map(self.outOfPixmap, points)
 
-    def setLastLabel(self, text, line_color  = None, fill_color = None):
+    def setLastLabel(self, text, line_color=None, fill_color=None):
         assert text
         self.shapes[-1].label = text
         if line_color:

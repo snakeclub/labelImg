@@ -26,6 +26,7 @@ by `ImageNet <http://www.image-net.org/>`__.  Besides, it also supports YOLO for
 
 `Watch a demo video <https://youtu.be/p0nR2YsCY_U>`__
 
+
 Installation
 ------------------
 
@@ -118,7 +119,7 @@ Open cmd and go to the `labelImg <#labelimg>`__ directory
 
     pyrcc4 -o lib/resources.py resources.qrc
     For pyqt5, pyrcc5 -o libs/resources.py resources.qrc
-    
+
     python labelImg.py
     python labelImg.py [IMAGE_PATH] [PRE-DEFINED CLASS FILE]
 

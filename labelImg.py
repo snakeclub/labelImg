@@ -7,6 +7,7 @@ import platform
 import re
 import sys
 import subprocess
+import json
 
 from functools import partial
 from collections import defaultdict
@@ -46,7 +47,15 @@ from libs.yolo_io import TXT_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem
 
-__appname__ = 'labelImg'
+# 扩展专用的类库
+import copy
+from libs.extend import ExtendLib, TFRecordCreater, TFObjectDetect
+from libs.cclib import CommonLib
+from HiveNetLib.base_tools.run_tool import RunTool
+from HiveNetLib.base_tools.file_tool import FileTool
+
+__appname__ = 'labelImg - Extend by Li Huijian'
+
 
 class WindowMixin(object):
 
@@ -80,8 +89,19 @@ class MainWindow(QMainWindow, WindowMixin):
         settings = self.settings
 
         # Load string bundle for i18n
-        self.stringBundle = StringBundle.getBundle()
-        getStr = lambda strId: self.stringBundle.getString(strId)
+        # 替换这个为使用中文
+        # self.stringBundle = StringBundle.getBundle()
+        self.stringBundle = StringBundle.getBundle('zh-CN')
+        def getStr(strId): return self.stringBundle.getString(strId)
+
+        # 映射字典
+        self.mapping = self.get_mapping_dict()
+
+        # 自动标注配置
+        self.auto_label = self.get_tf_auto_label()
+        self.auto_label_tool = TFObjectDetect(
+            self.auto_label, self.mapping, os.path.split(__file__)[0]
+        )
 
         # Save as Pascal voc xml
         self.defaultSaveDir = defaultSaveDir
@@ -117,8 +137,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Create a widget for using default label
         self.useDefaultLabelCheckbox = QCheckBox(getStr('useDefaultLabel'))
-        self.useDefaultLabelCheckbox.setChecked(False)
+        self.useDefaultLabelCheckbox.setChecked(True)  # 默认选中使用默认Label
         self.defaultLabelTextLine = QLineEdit()
+        self.defaultLabelTextLine.setText(self.mapping.get('defalut_class', ''))
         useDefaultLabelQHBoxLayout = QHBoxLayout()
         useDefaultLabelQHBoxLayout.addWidget(self.useDefaultLabelCheckbox)
         useDefaultLabelQHBoxLayout.addWidget(self.defaultLabelTextLine)
@@ -132,14 +153,32 @@ class MainWindow(QMainWindow, WindowMixin):
         self.editButton = QToolButton()
         self.editButton.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
 
+        # 添加一个删除是否提示的checkbox
+        self.deleteWarningButton = QCheckBox('删除对象告警提示')
+        self.deleteWarningButton.setChecked(True)
+
+        # 添加新增信息文件的按钮
+        self.newSelfInfoButton = QPushButton('添加独有信息文件')
+        self.newInfoButton = QPushButton('添加公共信息文件')
+        self.newSelfInfoButton.clicked.connect(self.newSelfInfoButton_click)
+        self.newInfoButton.clicked.connect(self.newInfoButton_click)
+
         # Add some of widgets to listLayout
         listLayout.addWidget(self.editButton)
         listLayout.addWidget(self.diffcButton)
+        listLayout.addWidget(self.deleteWarningButton)
         listLayout.addWidget(useDefaultLabelContainer)
+        listLayout.addWidget(self.newSelfInfoButton)
+        listLayout.addWidget(self.newInfoButton)
 
-        # Create and add combobox for showing unique labels in group 
+        # Create and add combobox for showing unique labels in group
         self.comboBox = ComboBox(self)
         listLayout.addWidget(self.comboBox)
+
+        # 添加自定义的商品信息展示表格
+        self.productInfo = QListWidget()
+        self.productInfo.doubleClicked.connect(self.product_item_double_clicked)
+        listLayout.addWidget(self.productInfo)
 
         # Create and add a widget for showing current label items
         self.labelList = QListWidget()
@@ -151,8 +190,6 @@ class MainWindow(QMainWindow, WindowMixin):
         # Connect to itemChanged to detect checkbox changes.
         self.labelList.itemChanged.connect(self.labelItemChanged)
         listLayout.addWidget(self.labelList)
-
-        
 
         self.dock = QDockWidget(getStr('boxLabelText'), self)
         self.dock.setObjectName(getStr('labels'))
@@ -190,6 +227,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.shapeMoved.connect(self.setDirty)
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
+        # 与画布的方法关联
+        self.canvas.openPrevDir.connect(self.openPrevDir)
+        self.canvas.openNextDir.connect(self.openNextDir)
+        self.canvas.openPrevImg.connect(self.openPrevImg)
+        self.canvas.openNextImg.connect(self.openNextImg)
+        self.canvas.deleteCurrentFile.connect(self.deleteCurrentFile)
 
         self.setCentralWidget(scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
@@ -201,6 +244,39 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Actions
         action = partial(newAction, self)
+
+        # 添加扩展菜单
+        imageDeal = action('处理图片', self.imageDeal, '',
+                           'imageDeal', '处理图片,包括转换格式和删除非RGB格式图片')
+
+        imageRename = action('批量重命名', self.imageRename, '',
+                             'imageRename', '批量重命名文件夹中的图片')
+
+        imageCropByTag = action('按标注截图', self.imageCropByTag, '',
+                                'imageCropByTag', '根据图像标注截图保存，如果没有标注则复制完整文件')
+
+        copyFlagsPics = action('按标注复制文件', self.copyFlagsPics, '',
+                               'copyFlagsPics', '按标注将文件复制到指定文件夹')
+
+        countFlags = action('标注统计', self.countFlags, '',
+                            'countFlags', '统计指定目录中的labelimg标记对应标签的数量')
+
+        createPbtxt = action('生成labelmap.pbtxt文件', self.createPbtxt, '',
+                             'createPbtxt', '根据mapping.json文件生成对应的labelmap.pbtxt文件')
+
+        labelimgToTFRecord = action('LabelImg生成TFRecord', self.labelimg_to_tfrecord, '',
+                                    'labelimgToTFRecord', '将LabelImg的标注生成TFRecord文件')
+
+        # 添加CC自定义菜单
+        # getDomTag = action('解析商品信息', self.dealDomFile, '',
+        #                    'getDomTag', '将解析当前文件清单的Dom文件生成商品信息')
+
+        # createProductXls = action('生成商品信息汇总', self.create_info_xls_file, '',
+        #                           'createProductXls', '将当前目录的产品信息生成excel汇总文件')
+
+        # cleanProductFiles = action('清理商品文件', self.clean_product_files, '',
+        #                            'cleanProductFiles', '清理商品文件内容')
+
         quit = action(getStr('quit'), self.close,
                       'Ctrl+Q', 'quit', getStr('quitApp'))
 
@@ -229,14 +305,16 @@ class MainWindow(QMainWindow, WindowMixin):
                       'Ctrl+S', 'save', getStr('saveDetail'), enabled=False)
 
         save_format = action('&PascalVOC', self.change_format,
-                      'Ctrl+', 'format_voc', getStr('changeSaveFormat'), enabled=True)
+                             'Ctrl+', 'format_voc', getStr('changeSaveFormat'), enabled=True)
 
         saveAs = action(getStr('saveAs'), self.saveFileAs,
                         'Ctrl+Shift+S', 'save-as', getStr('saveAsDetail'), enabled=False)
 
-        close = action(getStr('closeCur'), self.closeFile, 'Ctrl+W', 'close', getStr('closeCurDetail'))
+        close = action(getStr('closeCur'), self.closeFile,
+                       'Ctrl+W', 'close', getStr('closeCurDetail'))
 
-        resetAll = action(getStr('resetAll'), self.resetAll, None, 'resetall', getStr('resetAllDetail'))
+        resetAll = action(getStr('resetAll'), self.resetAll, None,
+                          'resetall', getStr('resetAllDetail'))
 
         color1 = action(getStr('boxLineColor'), self.chooseColor1,
                         'Ctrl+L', 'color_line', getStr('boxLineColorDetail'))
@@ -250,6 +328,14 @@ class MainWindow(QMainWindow, WindowMixin):
                         'w', 'new', getStr('crtBoxDetail'), enabled=False)
         delete = action(getStr('delBox'), self.deleteSelectedShape,
                         'Delete', 'delete', getStr('delBoxDetail'), enabled=False)
+
+        # 标注列表框右键增加添加自动标注的功能
+        add_auto = action('添加当前自动标注', self.addSelectedAutoShape,
+                          'Add_auto', 'add_auto', '将当前选中的自动标注添加为标注', enabled=True)
+
+        add_auto_all = action('添加所有勾选自动标注', self.addAllSelectedAutoShape,
+                              'Add_auto_all', 'add_auto_all', '将当前勾选的所有自动标注添加为标注', enabled=True)
+
         copy = action(getStr('dupBox'), self.copySelectedShape,
                       'Ctrl+D', 'copy', getStr('dupBoxDetail'),
                       enabled=False)
@@ -265,7 +351,8 @@ class MainWindow(QMainWindow, WindowMixin):
                          'Ctrl+A', 'hide', getStr('showAllBoxDetail'),
                          enabled=False)
 
-        help = action(getStr('tutorial'), self.showTutorialDialog, None, 'help', getStr('tutorialDetail'))
+        help = action(getStr('tutorial'), self.showTutorialDialog,
+                      None, 'help', getStr('tutorialDetail'))
         showInfo = action(getStr('info'), self.showInfoDialog, None, 'help', getStr('info'))
 
         zoom = QWidgetAction(self)
@@ -317,7 +404,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Label list context menu.
         labelMenu = QMenu()
-        addActions(labelMenu, (edit, delete))
+        addActions(labelMenu, (edit, delete, add_auto, add_auto_all))
         self.labelList.setContextMenuPolicy(Qt.CustomContextMenu)
         self.labelList.customContextMenuRequested.connect(
             self.popLabelListMenu)
@@ -330,7 +417,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.drawSquaresOption.triggered.connect(self.toogleDrawSquare)
 
         # Store actions for further handling.
-        self.actions = struct(save=save, save_format=save_format, saveAs=saveAs, open=open, close=close, resetAll = resetAll,
+        self.actions = struct(save=save, save_format=save_format, saveAs=saveAs, open=open, close=close, resetAll=resetAll,
                               lineColor=color1, create=create, delete=delete, edit=edit, copy=copy,
                               createMode=createMode, editMode=editMode, advancedMode=advancedMode,
                               shapeLineColor=shapeLineColor, shapeFillColor=shapeFillColor,
@@ -349,10 +436,13 @@ class MainWindow(QMainWindow, WindowMixin):
                                   close, create, createMode, editMode),
                               onShapesPresent=(saveAs, hideAll, showAll))
 
+        # 添加一级菜单
         self.menus = struct(
             file=self.menu('&File'),
             edit=self.menu('&Edit'),
             view=self.menu('&View'),
+            extend=self.menu('&Extend'),
+            # cc=self.menu('&CC'),
             help=self.menu('&Help'),
             recentFiles=QMenu('Open &Recent'),
             labelList=labelMenu)
@@ -374,6 +464,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.displayLabelOption.setChecked(settings.get(SETTING_PAINT_LABEL, False))
         self.displayLabelOption.triggered.connect(self.togglePaintLabelsOption)
 
+        # 添加子菜单
         addActions(self.menus.file,
                    (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs, close, resetAll, quit))
         addActions(self.menus.help, (help, showInfo))
@@ -385,6 +476,18 @@ class MainWindow(QMainWindow, WindowMixin):
             hideAll, showAll, None,
             zoomIn, zoomOut, zoomOrg, None,
             fitWindow, fitWidth))
+
+        # 扩展子菜单
+        addActions(
+            self.menus.extend,
+            (imageDeal, imageRename, imageCropByTag, copyFlagsPics,
+             countFlags, createPbtxt, labelimgToTFRecord,)
+        )
+
+        # addActions(
+        #     self.menus.cc,
+        #     (getDomTag, createProductXls, cleanProductFiles,)
+        # )
 
         self.menus.file.aboutToShow.connect(self.updateFileMenu)
 
@@ -419,7 +522,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # Add Chris
         self.difficult = False
 
-        ## Fix the compatible issue for qt4 and qt5. Convert the QStringList to python list
+        # Fix the compatible issue for qt4 and qt5. Convert the QStringList to python list
         if settings.get(SETTING_RECENT_FILES):
             if have_qstring():
                 recentFileQStringList = settings.get(SETTING_RECENT_FILES)
@@ -437,7 +540,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 break
         self.resize(size)
         self.move(position)
-        saveDir = ustr(settings.get(SETTING_SAVE_DIR, None))
+        # 不允许设置saveDir，声明文件统一在当前文件夹内
+        # saveDir = ustr(settings.get(SETTING_SAVE_DIR, None))
+        saveDir = None
         self.lastOpenDir = ustr(settings.get(SETTING_LAST_OPEN_DIR, None))
         if self.defaultSaveDir is None and saveDir is not None and os.path.exists(saveDir):
             self.defaultSaveDir = saveDir
@@ -446,8 +551,10 @@ class MainWindow(QMainWindow, WindowMixin):
             self.statusBar().show()
 
         self.restoreState(settings.get(SETTING_WIN_STATE, QByteArray()))
-        Shape.line_color = self.lineColor = QColor(settings.get(SETTING_LINE_COLOR, DEFAULT_LINE_COLOR))
-        Shape.fill_color = self.fillColor = QColor(settings.get(SETTING_FILL_COLOR, DEFAULT_FILL_COLOR))
+        Shape.line_color = self.lineColor = QColor(
+            settings.get(SETTING_LINE_COLOR, DEFAULT_LINE_COLOR))
+        Shape.fill_color = self.fillColor = QColor(
+            settings.get(SETTING_FILL_COLOR, DEFAULT_FILL_COLOR))
         self.canvas.setDrawingColor(self.lineColor)
         # Add chris
         Shape.difficult = self.difficult
@@ -483,6 +590,29 @@ class MainWindow(QMainWindow, WindowMixin):
         if self.filePath and os.path.isdir(self.filePath):
             self.openDirDialog(dirpath=self.filePath, silent=True)
 
+    def get_mapping_dict(self):
+        """
+        获取预定义的映射字典
+        """
+        _json_file = os.path.join(os.path.split(__file__)[0], 'data', 'mapping.json')
+        with open(_json_file, 'r', encoding='utf-8') as fp:
+            _mapping = json.loads(fp.read())
+
+        # 设置默认的mapping值
+        for _key in _mapping[_mapping['enable_mapping']].keys():
+            _mapping[_key] = _mapping[_mapping['enable_mapping']][_key]
+
+        # 返回值
+        return _mapping
+
+    def get_tf_auto_label(self):
+        """
+        获取自动标注配置
+        """
+        _json_file = os.path.join(os.path.split(__file__)[0], 'data', 'tf_auto_label.json')
+        with open(_json_file, 'r', encoding='utf-8') as fp:
+            return json.loads(fp.read())
+
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_Control:
             self.canvas.setDrawingShapeToSquare(False)
@@ -493,6 +623,78 @@ class MainWindow(QMainWindow, WindowMixin):
             self.canvas.setDrawingShapeToSquare(True)
 
     ## Support Functions ##
+
+    def newSelfInfoButton_click(self):
+        """
+        点击新增自有信息文件（添加文件自有的信息文件）
+        """
+        if self.filePath is None or self.filePath == "":
+            QMessageBox.warning(self, "告警", "没有打开图像文件", QMessageBox.Yes)
+            return
+
+        _path = os.path.split(self.filePath)[0]
+        _file_no_ext = FileTool.get_file_name_no_ext(self.filePath)
+        _info_file = os.path.join(_path, _file_no_ext + ".info")
+        if os.path.exists(_info_file):
+            QMessageBox.warning(self, "告警", "图像信息文件已存在", QMessageBox.Yes)
+            return
+
+        _count = self.productInfo.count()
+        if _count > 0:
+            _info_dict = dict()
+            for _row in range(_count):
+                _item = self.productInfo.item(_row)
+                _value = _item.text()
+                _index = _value.find('】')
+                _propname = _value[0:_index].strip('【】')
+                _propvalue = _value[_index + 2:]  # 加上一个空格
+                _info_dict[_propname] = _propvalue
+        else:
+            _info_dict = copy.deepcopy(self.mapping.get('info_key_dict', {}))
+
+        _json = str(_info_dict)
+        with open(_info_file, 'wb') as f:
+            f.write(str.encode(_json, encoding='utf-8'))
+
+        # 重新加载图像
+        self.loadFile(filePath=self.filePath)
+        QMessageBox.information(self, u'Information', "处理成功")
+
+    def newInfoButton_click(self):
+        """
+        点击新增公共信息文件按钮（添加文件夹公共的信息文件）
+        """
+        if self.filePath is None or self.filePath == "":
+            QMessageBox.warning(self, "告警", "没有打开图像文件", QMessageBox.Yes)
+            return
+
+        _path = os.path.split(self.filePath)[0]
+        _info_file = os.path.join(_path, 'info.json')
+        if os.path.exists(_info_file):
+            QMessageBox.warning(self, "告警", "文件夹信息文件已存在", QMessageBox.Yes)
+            return
+
+        _count = self.productInfo.count()
+        if _count > 0:
+            _info_dict = dict()
+            for _row in range(_count):
+                _item = self.productInfo.item(_row)
+                _value = _item.text()
+                _index = _value.find('】')
+                _propname = _value[0:_index].strip('【】')
+                _propvalue = _value[_index + 2:]  # 加上一个空格
+                _info_dict[_propname] = _propvalue
+        else:
+            _info_dict = copy.deepcopy(self.mapping.get('info_key_dict', {}))
+
+        _json = str(_info_dict)
+        with open(_info_file, 'wb') as f:
+            f.write(str.encode(_json, encoding='utf-8'))
+
+        # 重新加载图像
+        self.loadFile(filePath=self.filePath)
+        QMessageBox.information(self, u'Information', "处理成功")
+
     def set_format(self, save_format):
         if save_format == FORMAT_PASCALVOC:
             self.actions.save_format.setText(FORMAT_PASCALVOC)
@@ -509,8 +711,10 @@ class MainWindow(QMainWindow, WindowMixin):
             LabelFile.suffix = TXT_EXT
 
     def change_format(self):
-        if self.usingPascalVocFormat: self.set_format(FORMAT_YOLO)
-        elif self.usingYoloFormat: self.set_format(FORMAT_PASCALVOC)
+        if self.usingPascalVocFormat:
+            self.set_format(FORMAT_YOLO)
+        elif self.usingYoloFormat:
+            self.set_format(FORMAT_PASCALVOC)
 
     def noShapes(self):
         return not self.itemsToShapes
@@ -616,7 +820,8 @@ class MainWindow(QMainWindow, WindowMixin):
         subprocess.Popen(self.screencastViewer + [self.screencast])
 
     def showInfoDialog(self):
-        msg = u'Name:{0} \nApp Version:{1} \n{2} '.format(__appname__, __version__, sys.version_info)
+        msg = u'Name:{0} \nApp Version:{1} \n{2} '.format(
+            __appname__, __version__, sys.version_info)
         QMessageBox.information(self, u'Information', msg)
 
     def createShape(self):
@@ -689,15 +894,15 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.loadFile(filename)
 
     # Add chris
-    def btnstate(self, item= None):
+    def btnstate(self, item=None):
         """ Function to handle difficult examples
         Update on each object """
         if not self.canvas.editing():
             return
 
         item = self.currentItem()
-        if not item: # If not selected Item, take the first one
-            item = self.labelList.item(self.labelList.count()-1)
+        if not item:  # If not selected Item, take the first one
+            item = self.labelList.item(self.labelList.count() - 1)
 
         difficult = self.diffcButton.isChecked()
 
@@ -787,7 +992,7 @@ class MainWindow(QMainWindow, WindowMixin):
     def updateComboBox(self):
         # Get the unique labels and add them to the Combobox.
         itemsTextList = [str(self.labelList.item(i).text()) for i in range(self.labelList.count())]
-            
+
         uniqueTextList = list(set(itemsTextList))
         # Add a null row for showing all the labels
         uniqueTextList.append("")
@@ -806,10 +1011,16 @@ class MainWindow(QMainWindow, WindowMixin):
                         line_color=s.line_color.getRgb(),
                         fill_color=s.fill_color.getRgb(),
                         points=[(p.x(), p.y()) for p in s.points],
-                       # add chris
-                        difficult = s.difficult)
+                        # add chris
+                        difficult=s.difficult)
 
-        shapes = [format_shape(shape) for shape in self.canvas.shapes]
+        # 仅保存非auto_开头的标注
+        # shapes = [format_shape(shape) for shape in self.canvas.shapes]
+        shapes = list()
+        for shape in self.canvas.shapes:
+            if not shape.label.startswith('auto_'):
+                shapes.append(format_shape(shape))
+
         # Can add differrent annotation formats here
         try:
             if self.usingPascalVocFormat is True:
@@ -821,7 +1032,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 if annotationFilePath[-4:].lower() != ".txt":
                     annotationFilePath += TXT_EXT
                 self.labelFile.saveYoloFormat(annotationFilePath, shapes, self.filePath, self.imageData, self.labelHist,
-                                                   self.lineColor.getRgb(), self.fillColor.getRgb())
+                                              self.lineColor.getRgb(), self.fillColor.getRgb())
             else:
                 self.labelFile.save(annotationFilePath, shapes, self.filePath, self.imageData,
                                     self.lineColor.getRgb(), self.fillColor.getRgb())
@@ -835,12 +1046,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.addLabel(self.canvas.copySelectedShape())
         # fix copy and delete
         self.shapeSelectionChanged(True)
-    
+
     def comboSelectionChanged(self, index):
         text = self.comboBox.cb.itemText(index)
         for i in range(self.labelList.count()):
             if text == "":
-                self.labelList.item(i).setCheckState(2) 
+                self.labelList.item(i).setCheckState(2)
             elif text != self.labelList.item(i).text():
                 self.labelList.item(i).setCheckState(0)
             else:
@@ -989,6 +1200,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def loadFile(self, filePath=None):
         """Load the specified file, or the last opened file if None."""
+        # 自动保存
+        if self.autoSaving.isChecked():
+            if self.dirty is True:
+                self.saveFile()
+
         self.resetState()
         self.canvas.setEnabled(False)
         if filePath is None:
@@ -1067,6 +1283,11 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.loadPascalXMLByFilename(xmlPath)
                 elif os.path.isfile(txtPath):
                     self.loadYOLOTXTByFilename(txtPath)
+                else:
+                    shapes = self.auto_label_tool.detect_object(
+                        self.filePath, []
+                    )
+                    self.loadLabels(shapes)
             else:
                 xmlPath = os.path.splitext(filePath)[0] + XML_EXT
                 txtPath = os.path.splitext(filePath)[0] + TXT_EXT
@@ -1074,13 +1295,27 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.loadPascalXMLByFilename(xmlPath)
                 elif os.path.isfile(txtPath):
                     self.loadYOLOTXTByFilename(txtPath)
+                else:
+                    shapes = self.auto_label_tool.detect_object(
+                        self.filePath, [],
+                    )
+                    self.loadLabels(shapes)
 
             self.setWindowTitle(__appname__ + ' ' + filePath)
 
+            # 补充获取图片的商品信息
+
+            _info = ExtendLib.get_info_dict(filePath, self.mapping.get('info_key_dict', {}))
+            self.productInfo.clear()
+            for _key in _info.keys():
+                self.productInfo.addItem('【%s】 %s' % (_key, _info[_key]))
+
             # Default : select last item if there is at least one item
             if self.labelList.count():
-                self.labelList.setCurrentItem(self.labelList.item(self.labelList.count()-1))
-                self.labelList.item(self.labelList.count()-1).setSelected(True)
+                # 这里屏蔽了自动选中标签
+                pass
+                # self.labelList.setCurrentItem(self.labelList.item(self.labelList.count() - 1))
+                # self.labelList.item(self.labelList.count() - 1).setSelected(True)
 
             self.canvas.setFocus(True)
             return True
@@ -1157,7 +1392,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.loadFile(filename)
 
     def scanAllImages(self, folderPath):
-        extensions = ['.%s' % fmt.data().decode("ascii").lower() for fmt in QImageReader.supportedImageFormats()]
+        extensions = ['.%s' % fmt.data().decode("ascii").lower()
+                      for fmt in QImageReader.supportedImageFormats()]
         images = []
 
         for root, dirs, files in os.walk(folderPath):
@@ -1176,8 +1412,8 @@ class MainWindow(QMainWindow, WindowMixin):
             path = '.'
 
         dirpath = ustr(QFileDialog.getExistingDirectory(self,
-                                                       '%s - Save annotations to the directory' % __appname__, path,  QFileDialog.ShowDirsOnly
-                                                       | QFileDialog.DontResolveSymlinks))
+                                                        '%s - Save annotations to the directory' % __appname__, path, QFileDialog.ShowDirsOnly
+                                                        | QFileDialog.DontResolveSymlinks))
 
         if dirpath is not None and len(dirpath) > 1:
             self.defaultSaveDir = dirpath
@@ -1196,7 +1432,8 @@ class MainWindow(QMainWindow, WindowMixin):
             if self.filePath else '.'
         if self.usingPascalVocFormat:
             filters = "Open Annotation XML file (%s)" % ' '.join(['*.xml'])
-            filename = ustr(QFileDialog.getOpenFileName(self,'%s - Choose a xml file' % __appname__, path, filters))
+            filename = ustr(QFileDialog.getOpenFileName(
+                self, '%s - Choose a xml file' % __appname__, path, filters))
             if filename:
                 if isinstance(filename, (tuple, list)):
                     filename = filename[0]
@@ -1211,10 +1448,10 @@ class MainWindow(QMainWindow, WindowMixin):
             defaultOpenDirPath = self.lastOpenDir
         else:
             defaultOpenDirPath = os.path.dirname(self.filePath) if self.filePath else '.'
-        if silent!=True :
+        if silent != True:
             targetDirPath = ustr(QFileDialog.getExistingDirectory(self,
-                                                         '%s - Open Directory' % __appname__, defaultOpenDirPath,
-                                                         QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks))
+                                                                  '%s - Open Directory' % __appname__, defaultOpenDirPath,
+                                                                  QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks))
         else:
             targetDirPath = ustr(defaultOpenDirPath)
 
@@ -1255,12 +1492,15 @@ class MainWindow(QMainWindow, WindowMixin):
     def openPrevImg(self, _value=False):
         # Proceding prev image without dialog if having any label
         if self.autoSaving.isChecked():
-            if self.defaultSaveDir is not None:
-                if self.dirty is True:
-                    self.saveFile()
-            else:
-                self.changeSavedirDialog()
-                return
+            # 直接保存，不设置默认目录
+            if self.dirty is True:
+                self.saveFile()
+            # if self.defaultSaveDir is not None:
+            #     if self.dirty is True:
+            #         self.saveFile()
+            # else:
+            #     self.changeSavedirDialog()
+            #     return
 
         if not self.mayContinue():
             return
@@ -1280,12 +1520,14 @@ class MainWindow(QMainWindow, WindowMixin):
     def openNextImg(self, _value=False):
         # Proceding prev image without dialog if having any label
         if self.autoSaving.isChecked():
-            if self.defaultSaveDir is not None:
-                if self.dirty is True:
-                    self.saveFile()
-            else:
-                self.changeSavedirDialog()
-                return
+            if self.dirty is True:
+                self.saveFile()
+            # if self.defaultSaveDir is not None:
+            #     if self.dirty is True:
+            #         self.saveFile()
+            # else:
+            #     self.changeSavedirDialog()
+            #     return
 
         if not self.mayContinue():
             return
@@ -1308,9 +1550,11 @@ class MainWindow(QMainWindow, WindowMixin):
         if not self.mayContinue():
             return
         path = os.path.dirname(ustr(self.filePath)) if self.filePath else '.'
-        formats = ['*.%s' % fmt.data().decode("ascii").lower() for fmt in QImageReader.supportedImageFormats()]
+        formats = ['*.%s' % fmt.data().decode("ascii").lower()
+                   for fmt in QImageReader.supportedImageFormats()]
         filters = "Image & Label files (%s)" % ' '.join(formats + ['*%s' % LabelFile.suffix])
-        filename = QFileDialog.getOpenFileName(self, '%s - Choose Image or Label file' % __appname__, path, filters)
+        filename = QFileDialog.getOpenFileName(
+            self, '%s - Choose Image or Label file' % __appname__, path, filters)
         if filename:
             if isinstance(filename, (tuple, list)):
                 filename = filename[0]
@@ -1328,8 +1572,705 @@ class MainWindow(QMainWindow, WindowMixin):
             imgFileName = os.path.basename(self.filePath)
             savedFileName = os.path.splitext(imgFileName)[0]
             savedPath = os.path.join(imgFileDir, savedFileName)
-            self._saveFile(savedPath if self.labelFile
-                           else self.saveFileDialog(removeExt=False))
+            self._saveFile(savedPath)
+            # self._saveFile(savedPath if self.labelFile
+            #                else self.saveFileDialog(removeExt=False))
+
+    def product_item_double_clicked(self, modelindex: QtCore.QModelIndex) -> None:
+        """
+        商品信息按钮双击进行编辑
+
+        @param {QModelIndex} modelindex - <description>
+
+        @returns {None} - <description>
+        """
+        _row = modelindex.row()
+        _item = self.productInfo.item(_row)
+        _value = _item.text()
+        _index = _value.find('】')
+        _propname = _value[0:_index].strip('【】')
+        _propvalue = _value[_index + 2:]  # 加上一个空格
+        _new_value, ok = QInputDialog.getText(
+            self, "编辑信息项", "请输入要设置的【%s】值：" % _propname, QLineEdit.Normal, _propvalue)
+
+        # 设置值
+        if ok:
+            ok = ExtendLib.change_info_file(self.filePath, _propname, _new_value)
+        else:
+            return
+
+        # 修改显示
+        if ok:
+            _item.setText('【%s】 %s' % (_propname, _new_value))
+        else:
+            # 提示错误
+            QMessageBox.warning(self, "告警", "编辑信息项失败", QMessageBox.Yes)
+
+    def imageDeal(self, _value=False):
+        """
+        处理图片,包括转换格式和删除非RGB格式图片
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件路径
+        _deal_dir = str(QFileDialog.getExistingDirectory(
+            self,
+            self.tr('%s - Open Directory') % __appname__,
+            '',
+            QFileDialog.ShowDirsOnly |
+            QFileDialog.DontResolveSymlinks))
+
+        if not _deal_dir:
+            return
+
+        TFRecordCreater.labelimg_pic_deal(_deal_dir)
+
+        QMessageBox.information(
+            self, "提示", "图片处理成功", QMessageBox.Yes)
+
+    def imageRename(self, _value=False):
+        """
+        批量重命名文件夹中的图片
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件路径
+        _deal_dir = str(QFileDialog.getExistingDirectory(
+            self,
+            self.tr('%s - Open Directory') % __appname__,
+            '',
+            QFileDialog.ShowDirsOnly |
+            QFileDialog.DontResolveSymlinks))
+
+        if not _deal_dir:
+            return
+
+        TFRecordCreater.labelimg_rename_filename(_deal_dir)
+
+        QMessageBox.information(
+            self, "提示", "图片批量重命名成功", QMessageBox.Yes)
+
+    def imageCropByTag(self, _value=False):
+        """
+        按标注截图
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件路径
+        _source_dir = str(QFileDialog.getExistingDirectory(
+            self,
+            self.tr('%s - Copy Source Directory') % __appname__,
+            '',
+            QFileDialog.ShowDirsOnly |
+            QFileDialog.DontResolveSymlinks))
+
+        if not _source_dir:
+            return
+
+        _dest_dir = str(QFileDialog.getExistingDirectory(
+            self,
+            self.tr('%s - Copy Dest Directory') % __appname__,
+            '',
+            QFileDialog.ShowDirsOnly |
+            QFileDialog.DontResolveSymlinks))
+
+        if not _dest_dir:
+            return
+
+        # 判断无标注文件是否复制
+        _copy_no_flag_pic = False
+        _result = QMessageBox().question(
+            self, "询问", '无标注的图片文件是否进行复制？',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+        )
+        if _result == QMessageBox.Yes:
+            _copy_no_flag_pic = True
+
+        # 判断截取图片按子目录保存
+        _with_sub_dir = False
+        _result = QMessageBox().question(
+            self, "询问", '是否按原目录结构保存截取的图片？',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if _result == QMessageBox.Yes:
+            _with_sub_dir = True
+
+        # 进度显示
+        pd = QProgressDialog(self)
+        pd.setMinimumSize(500, 200)
+        pd.setWindowTitle("按标注截取图片保存")
+        pd.setLabelText("处理进度")
+        pd.setCancelButtonText("取消")
+
+        timer = QtCore.QTimer(pd)
+
+        _iter_list = TFRecordCreater.labelimg_crop_pic_by_flags(
+            _source_dir, _dest_dir, copy_no_flag_pic=_copy_no_flag_pic,
+            with_sub_dir=_with_sub_dir, fix_len=10
+        )
+
+        RunTool.set_global_var(
+            'IMAGE_CROP_BY_TAG_TEMP',
+            {
+                'result_iter': _iter_list,
+                'last_result': None
+            }
+        )
+
+        def show_progress():
+            _para = RunTool.get_global_var('IMAGE_CROP_BY_TAG_TEMP')
+            _progress = _para['result_iter'].__next__()
+
+            if _progress is None or not _progress[2] or _progress[0] == _progress[1]:
+                # 满足停止条件
+                timer.stop()
+                if _progress is None:
+                    _progress = _para['last_result']
+
+                if _progress[2]:
+                    pd.setValue(_progress[0])
+                    pd.setLabelText('处理成功！')
+                else:
+                    pd.setLabelText('处理失败！')
+
+                # 显示提示
+                pd.setCancelButtonText("关闭")
+                pd.show()
+                return
+
+            _para['last_result'] = _progress
+
+            if _progress[1] != pd.maximum():
+                pd.setRange(0, _progress[1])
+                pd.show()
+
+            # 显示进度
+            pd.setValue(_progress[0])
+
+        timer.timeout.connect(show_progress)
+        timer.start(10)
+
+        pd.canceled.connect(timer.stop)
+
+    def copyFlagsPics(self, _value=False):
+        """
+        按标注将文件复制到指定文件夹
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件路径
+        _source_dir = str(QFileDialog.getExistingDirectory(
+            self,
+            self.tr('%s - Copy Source Directory') % __appname__,
+            '',
+            QFileDialog.ShowDirsOnly |
+            QFileDialog.DontResolveSymlinks))
+
+        if not _source_dir:
+            return
+
+        _dest_dir = str(QFileDialog.getExistingDirectory(
+            self,
+            self.tr('%s - Copy Dest Directory') % __appname__,
+            '',
+            QFileDialog.ShowDirsOnly |
+            QFileDialog.DontResolveSymlinks))
+
+        if not _dest_dir:
+            return
+
+        TFRecordCreater.labelimg_copy_flags_pics(
+            _source_dir, _dest_dir, use_mapping=True, mapping=self.mapping
+        )
+
+        QMessageBox.information(
+            self, "提示", "按标签复制文件成功", QMessageBox.Yes)
+
+    def countFlags(self, _value=False):
+        """
+        统计指定目录中的labelimg标记对应标签的数量
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件路径
+        _deal_dir = str(QFileDialog.getExistingDirectory(
+            self,
+            self.tr('%s - Open Directory') % __appname__,
+            '',
+            QFileDialog.ShowDirsOnly |
+            QFileDialog.DontResolveSymlinks))
+
+        if not _deal_dir:
+            return
+
+        # 进度显示
+        pd = QProgressDialog(self)
+        pd.setMinimumSize(500, 200)
+        pd.setWindowTitle("统计labelimg标记数量")
+        pd.setLabelText("处理进度")
+        pd.setCancelButtonText("取消")
+
+        timer = QtCore.QTimer(pd)
+
+        _iter_list = TFRecordCreater.labelimg_flags_count(
+            _deal_dir, self.mapping
+        )
+
+        RunTool.set_global_var(
+            'LABELIMG_FLAGS_COUNT_TEMP',
+            {
+                'result_iter': _iter_list,
+                'last_result': None
+            }
+        )
+
+        def show_progress():
+            _para = RunTool.get_global_var('LABELIMG_FLAGS_COUNT_TEMP')
+            _progress = _para['result_iter'].__next__()
+
+            if _progress is None or not _progress[2] or _progress[0] == _progress[1]:
+                # 满足停止条件
+                timer.stop()
+                if _progress is None:
+                    _progress = _para['last_result']
+
+                if _progress[2]:
+                    pd.setValue(_progress[0])
+                    _count_str = '%s:\n%s' % (
+                        'LabelImg标注统计', json.dumps(_progress[3], ensure_ascii=False, indent=4)
+                    )
+                    print(_count_str)
+                    pd.setLabelText(_count_str)
+                else:
+                    pd.setLabelText('处理失败！')
+
+                # 显示提示
+                pd.setCancelButtonText("关闭")
+                pd.show()
+                return
+
+            _para['last_result'] = _progress
+
+            if _progress[1] != pd.maximum():
+                pd.setRange(0, _progress[1])
+                pd.show()
+
+            # 显示进度
+            pd.setValue(_progress[0])
+
+        timer.timeout.connect(show_progress)
+        timer.start(10)
+
+        pd.canceled.connect(timer.stop)
+
+    def createPbtxt(self, _value=False):
+        """
+        根据mapping.json文件生成对应的labelmap.pbtxt文件
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件路径
+        _deal_dir = str(QFileDialog.getExistingDirectory(
+            self,
+            self.tr('%s - Open Directory') % __appname__,
+            '',
+            QFileDialog.ShowDirsOnly |
+            QFileDialog.DontResolveSymlinks))
+
+        if not _deal_dir:
+            return
+
+        if TFRecordCreater.create_pbtxt(_deal_dir, self.mapping):
+            QMessageBox.information(
+                self, "提示", "labelmap.pbtxt文件创建成功", QMessageBox.Yes)
+        else:
+            QMessageBox.information(
+                self, "提示", "labelmap.pbtxt文件创建失败", QMessageBox.Yes)
+
+    def labelimg_to_tfrecord(self, _value=False):
+        """
+        将LabelImg的标注生成TFRecord文件
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件路径
+        _deal_dir = str(QFileDialog.getExistingDirectory(
+            self,
+            self.tr('%s - Open Directory') % __appname__,
+            '',
+            QFileDialog.ShowDirsOnly |
+            QFileDialog.DontResolveSymlinks))
+
+        # 拆分文件数量
+        _num_per_file, ok = QInputDialog.getText(
+            self, "拆分文件参数", "请输入每个TFRecord文件包含的图片数量(不拆分传空或0)：", QLineEdit.Normal, '0')
+
+        if _num_per_file == '':
+            _num_per_file = None
+        else:
+            _num_per_file = int(_num_per_file)
+            if _num_per_file <= 0:
+                _num_per_file = None
+
+        # 进度显示
+        pd = QProgressDialog(self)
+        pd.setMinimumSize(500, 200)
+        pd.setWindowTitle("生成LabelImg标注的TFRecord文件")
+        pd.setLabelText("处理进度")
+        pd.setCancelButtonText("取消")
+
+        timer = QtCore.QTimer(pd)
+
+        _iter_list = TFRecordCreater.labelimg_to_tfrecord(
+            _deal_dir, os.path.join(_deal_dir, '%s.record' % FileTool.get_dir_name(_deal_dir)),
+            _num_per_file, use_mapping=True, mapping=self.mapping
+        )
+
+        RunTool.set_global_var(
+            'LABELIMG_TO_TFRECORD_TEMP',
+            {
+                'result_iter': _iter_list,
+                'last_result': None
+            }
+        )
+
+        def show_progress():
+            _para = RunTool.get_global_var('LABELIMG_TO_TFRECORD_TEMP')
+            _progress = _para['result_iter'].__next__()
+
+            if _progress is None or not _progress[2] or _progress[0] == _progress[1]:
+                # 满足停止条件
+                timer.stop()
+                if _progress is None:
+                    _progress = _para['last_result']
+
+                if _progress[2]:
+                    pd.setValue(_progress[0])
+                    pd.setLabelText('处理成功！')
+                else:
+                    pd.setLabelText('处理失败！')
+
+                # 显示提示
+                pd.setCancelButtonText("关闭")
+                pd.show()
+                return
+
+            _para['last_result'] = _progress
+
+            if _progress[1] != pd.maximum():
+                pd.setRange(0, _progress[1])
+                pd.show()
+
+            # 显示进度
+            pd.setValue(_progress[0])
+
+        timer.timeout.connect(show_progress)
+        timer.start(10)
+
+        pd.canceled.connect(timer.stop)
+
+    def dealDomFile(self, _value=False):
+        """
+        解析当前文件清单的dom文件生成商品信息
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件清单
+        if self.dirname is None:
+            QMessageBox(QMessageBox.Warning, '警告', '未打开文件目录！').exec()
+            return
+
+        _file_list = CommonLib.get_dom_file_list(self.dirname)
+        if len(_file_list) == 0:
+            return
+
+        # 判断是否需要重做已有文件的
+        _redo = False
+        _result = QMessageBox().question(
+            self, "询问", '对于已有info.json的商品是否重新解析？',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if _result == QMessageBox.Yes:
+            _redo = True
+
+        pd = QProgressDialog(self)
+        pd.setMinimumSize(500, 200)
+        pd.setWindowTitle("解析dom文件商品信息")
+        pd.setLabelText("处理进度")
+        pd.setCancelButtonText("取消")
+
+        pd.setRange(0, len(_file_list))
+        pd.show()
+        timer = QTimer(pd)
+
+        RunTool.set_global_var(
+            'DEAL_DOM_FILE_TEMP',
+            {
+                'index': 0,
+                'file_list': _file_list,
+                'fail_list': [],
+                'redo': _redo
+            }
+        )
+
+        def deal_with_dom_file():
+            _para = RunTool.get_global_var('DEAL_DOM_FILE_TEMP')
+            _current_index = _para['index']
+            _file_list = _para['file_list']
+
+            # 通过timer逐个文件进行处理
+            if not CommonLib.analyse_dom_file(_file_list[_para['index']], redo=_para['redo']):
+                # 处理失败，加入失败清单
+                _para['fail_list'].append(_file_list[_para['index']])
+                # pd.cancel()  # 失败取消继续执行
+
+            # 更新进展
+            _para['index'] += 1
+            pd.setValue(_para['index'])
+
+            # 判断是否已全部处理完成
+            if _para['index'] >= pd.maximum():
+                # 已全部执行完成
+                timer.stop()
+                if len(_para['fail_list']) == 0:
+                    pd.setWindowTitle("解析dom文件商品信息")
+                    pd.setLabelText('解析dom文件商品信息完成')
+
+                else:
+                    # 存在失败的情况
+                    pd.setWindowTitle("解析dom文件商品信息")
+                    pd.setLabelText('存在处理失败文件:\r\n' + '\r\n'.join(_para['fail_list']))
+
+                # 显示提示
+                pd.setCancelButtonText("关闭")
+                pd.show()
+
+        timer.timeout.connect(deal_with_dom_file)
+        timer.start(10)
+
+        pd.canceled.connect(timer.stop)
+
+    def create_info_xls_file(self, _value=False):
+        """
+        将当前目录的产品信息生成excel汇总文件
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件清单
+        _deal_dir = self.dirname
+        if self.dirname is None:
+            _deal_dir = str(QFileDialog.getExistingDirectory(
+                self,
+                self.tr('%s - Open Directory') % __appname__,
+                '',
+                QFileDialog.ShowDirsOnly |
+                QFileDialog.DontResolveSymlinks))
+
+            if not _deal_dir:
+                return
+
+        pd = QProgressDialog(self)
+        pd.setMinimumSize(500, 200)
+        pd.setWindowTitle("生成商品信息汇总文件")
+        pd.setLabelText("处理进度")
+        # pd.setCancelButtonText("取消")
+        pd.setRange(0, 1)
+        pd.setValue(0)
+        pd.show()
+
+        if CommonLib.product_info_to_xls(_deal_dir):
+            # 处理成功
+            pd.setLabelText('处理成功')
+        else:
+            # 处理失败
+            pd.setLabelText('处理失败')
+
+        # 显示提示
+        pd.setCancelButtonText("关闭")
+        pd.setValue(1)
+        pd.show()
+
+    def clean_product_files(self, _value=False):
+        """
+        清理商品信息文件夹内容
+
+        @param {bool} _value=False - <description>
+        """
+        # 获取需要处理的文件清单
+        _deal_dir = self.dirname
+        if self.dirname is None:
+            _deal_dir = str(QFileDialog.getExistingDirectory(
+                self,
+                self.tr('%s - Open Directory') % __appname__,
+                '',
+                QFileDialog.ShowDirsOnly |
+                QFileDialog.DontResolveSymlinks))
+
+            if not _deal_dir:
+                return
+
+        pd = QProgressDialog(self)
+        pd.setMinimumSize(500, 200)
+        pd.setWindowTitle("清理商品信息文件")
+        pd.setLabelText("处理进度")
+
+        timer = QtCore.QTimer(pd)
+
+        _iter_list = CommonLib.clean_file_path(_deal_dir)
+
+        RunTool.set_global_var(
+            'CLEAN_PRODUCT_FILES_TEMP',
+            {
+                'result_iter': _iter_list,
+                'last_result': None
+            }
+        )
+
+        def show_progress():
+            _para = RunTool.get_global_var('CLEAN_PRODUCT_FILES_TEMP')
+            _progress = _para['result_iter'].__next__()
+
+            if _progress is None or not _progress[2] or _progress[0] == _progress[1]:
+                # 满足停止条件
+                timer.stop()
+                if _progress is None:
+                    _progress = _para['last_result']
+
+                if _progress[2]:
+                    pd.setValue(_progress[0])
+                    pd.setLabelText('处理成功！')
+                else:
+                    pd.setLabelText('处理失败！')
+
+                # 显示提示
+                pd.setCancelButtonText("关闭")
+                pd.show()
+                return
+
+            _para['last_result'] = _progress
+
+            if _progress[1] != pd.maximum():
+                pd.setRange(0, _progress[1])
+                pd.show()
+
+            # 显示进度
+            pd.setValue(_progress[0])
+
+        timer.timeout.connect(show_progress)
+        timer.start(10)
+
+        pd.canceled.connect(timer.stop)
+
+    def deleteCurrentFile(self, _value=False):
+        """
+        删除当前文件
+
+        @param {bool} _value=False - <description>
+        """
+        if self.filePath is not None:
+            if self.deleteWarningButton.isChecked():
+                _result = QMessageBox().question(
+                    self, "询问", '确认删除文件：\r\n%s' % self.filePath,
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if not _result == QMessageBox.Yes:
+                    return
+
+            _file = self.filePath
+            _row = self.fileListWidget.currentRow()
+
+            # 转到下一个图片
+            self.openNextImg()
+
+            if _file == self.filePath:
+                # 已经是最后一个图片
+                self.openPrevImg()
+                if _file == self.filePath:
+                    self.closeFile()
+
+            # 从列表清单中删除_row
+            self.mImgList.remove(_file)
+            self.fileListWidget.takeItem(_row)
+
+            # 开始执行删除文件操作
+            FileTool.remove_file(_file)
+
+            # 提示
+            QMessageBox.information(self, "提示", "文件删除成功", QMessageBox.Yes)
+
+    def openPrevDir(self, _value=False):
+        """
+        打开上一个文件夹
+
+        @param {bool} _value=False - <description>
+        """
+        # Proceding prev image without dialog if having any label
+        if self.autoSaving.isChecked():
+            if self.dirty is True:
+                self.saveFile()
+
+        if not self.mayContinue():
+            return
+
+        if len(self.mImgList) <= 0:
+            return
+
+        filename = None
+        if self.filePath is None:
+            filename = self.mImgList[0]
+        else:
+            currIndex = self.mImgList.index(self.filePath)
+            _path = os.path.split(self.filePath)[0]
+            _is_found = False
+            while currIndex > 0:
+                currIndex -= 1
+                if _is_found:
+                    # 已找到，只是需要找第一个
+                    if os.path.split(self.mImgList[currIndex])[0] != _path:
+                        currIndex += 1
+                        filename = self.mImgList[currIndex]
+                        break
+                else:
+                    if os.path.split(self.mImgList[currIndex])[0] != _path:
+                        # 找到了上一个文件夹, 设置标签，还要继续循环找第一个
+                        _path = os.path.split(self.mImgList[currIndex])[0]
+                        _is_found = True
+
+        if filename:
+            self.loadFile(filename)
+
+    def openNextDir(self, _value=False):
+        """
+        打开下一个文件夹
+
+        @param {bool} _value=False - <description>
+        """
+        # Proceding prev image without dialog if having any label
+        if self.autoSaving.isChecked():
+            if self.dirty is True:
+                self.saveFile()
+
+        if not self.mayContinue():
+            return
+
+        if len(self.mImgList) <= 0:
+            return
+
+        filename = None
+        if self.filePath is None:
+            filename = self.mImgList[0]
+        else:
+            currIndex = self.mImgList.index(self.filePath)
+            _path = os.path.split(self.filePath)[0]
+            while currIndex < len(self.mImgList) - 1:
+                currIndex += 1
+                if os.path.split(self.mImgList[currIndex])[0] != _path:
+                    # 找到了下一个文件夹
+                    filename = self.mImgList[currIndex]
+                    break
+
+        if filename:
+            self.loadFile(filename)
 
     def saveFileAs(self, _value=False):
         assert not self.image.isNull(), "cannot save empty image"
@@ -1348,7 +2289,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if dlg.exec_():
             fullFilePath = ustr(dlg.selectedFiles()[0])
             if removeExt:
-                return os.path.splitext(fullFilePath)[0] # Return file path without the extension.
+                return os.path.splitext(fullFilePath)[0]  # Return file path without the extension.
             else:
                 return fullFilePath
         return ''
@@ -1406,6 +2347,41 @@ class MainWindow(QMainWindow, WindowMixin):
             for action in self.actions.onShapesPresent:
                 action.setEnabled(False)
 
+    # 将选中的自动标注添加到xml文件中
+    def addSelectedAutoShape(self):
+        """
+        将选中标注置为正式标注
+        """
+        item = self.currentItem()
+        if not item:
+            return
+
+        _label = item.text()
+        if _label.startswith('auto_'):
+            _label = _label[_label.find('_', 5) + 1:]
+            item.setText(_label)
+            item.setBackground(generateColorByText(_label))
+            self.setDirty()
+            self.updateComboBox()
+
+    def addAllSelectedAutoShape(self):
+        """
+        将所有勾选的自动批注设置为正式批注
+        """
+        _is_change = False
+        for i in range(self.labelList.count()):
+            item = self.labelList.item(i)
+            _label = item.text()
+            if item.checkState() == 2 and _label.startswith('auto_'):
+                _label = _label[_label.find('_', 5) + 1:]
+                item.setText(_label)
+                item.setBackground(generateColorByText(_label))
+                _is_change = True
+
+        if _is_change:
+            self.setDirty()
+            self.updateComboBox()
+
     def chshapeLineColor(self):
         color = self.colorDialog.getColor(self.lineColor, u'Choose line color',
                                           default=DEFAULT_LINE_COLOR)
@@ -1451,6 +2427,14 @@ class MainWindow(QMainWindow, WindowMixin):
 
         tVocParseReader = PascalVocReader(xmlPath)
         shapes = tVocParseReader.getShapes()
+
+        # 增加auto_label的形状显示
+        shapes.extend(
+            self.auto_label_tool.detect_object(
+                self.filePath, shapes
+            )
+        )
+
         self.loadLabels(shapes)
         self.canvas.verified = tVocParseReader.verified
 
@@ -1463,7 +2447,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.set_format(FORMAT_YOLO)
         tYoloParseReader = YoloReader(txtPath, self.image)
         shapes = tYoloParseReader.getShapes()
-        print (shapes)
+        print(shapes)
         self.loadLabels(shapes)
         self.canvas.verified = tYoloParseReader.verified
 
@@ -1473,6 +2457,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def toogleDrawSquare(self):
         self.canvas.setDrawingShapeToSquare(self.drawSquaresOption.isChecked())
+
 
 def inverted(color):
     return QColor(*[255 - v for v in color.getRgb()])
@@ -1509,6 +2494,7 @@ def main():
     '''construct main app and run it'''
     app, _win = get_main_app(sys.argv)
     return app.exec_()
+
 
 if __name__ == '__main__':
     sys.exit(main())
